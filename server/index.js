@@ -17,14 +17,12 @@ app.use(express.json());
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, model: MODEL }));
-
 app.post('/api/coach/next', async (req, res) => {
   try {
-    const { sessionId = 'anon', brief = EMPTY_BRIEF, user_input = "" } = req.body || {};
+    const { sessionId = 'anon', brief = EMPTY_BRIEF, user_input = "", forceFinal=false } = req.body || {};
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Missing OPENAI_API_KEY' });
 
-    rememberTurn(sessionId, user_input);
+    rememberTurn(sessionId, user_input || (forceFinal ? '[SKIP]' : ''));
 
     const turns = getTurns(sessionId);
     const inferred = softInfer({ ...EMPTY_BRIEF, ...brief }, turns, user_input);
@@ -38,7 +36,8 @@ app.post('/api/coach/next', async (req, res) => {
     const hardAvoid = FIELDS.filter(f => status[f] || askCounts[f] >= 3);
     const prevQuestions = Object.fromEntries(FIELDS.map(f => [f, getLastQuestion(sessionId, f)]));
 
-    const phaseHint = (percent >= 80 || totalTurns >= 8) ? 'confirm' : 'gather';
+    let phaseHint = (percent >= 80 || totalTurns >= 8) ? 'confirm' : 'gather';
+    if (forceFinal) phaseHint = 'final';
 
     const messages = [
       { role: 'system', content: COACH_PROMPT },
@@ -48,6 +47,7 @@ Inferred Brief JSON (server): ${JSON.stringify(inferred)}
 Field completion status: ${JSON.stringify(status)}
 Completion percent (server): ${percent}
 Phase hint (server): ${phaseHint}
+User pressed SKIP: ${forceFinal ? 'YES' : 'NO'}
 
 Re-ask cap per field: 3
 Ask counts so far: ${JSON.stringify(askCounts)}
@@ -60,7 +60,7 @@ User latest message:
 ${user_input}
 >>>
 
-Follow the re-ask policy (if you re-ask, change the wording and include examples/choices/template). Return JSON as specified.` }
+If User pressed SKIP is YES, do not ask more questions; produce phase="final" with a strong Gold Prompt and a concise verify list.` }
     ];
 
     const r = await client.responses.create({ model: MODEL, input: messages });
@@ -82,8 +82,8 @@ Follow the re-ask policy (if you re-ask, change the wording and include examples
     const newStatus = fieldStatus(updated);
     const newPercent = completionPercent(updated);
 
-    let phase = out.phase || phaseHint;
-    if (phase === 'final' && newPercent < 100) phase = 'confirm';
+    let phase = forceFinal ? 'final' : (out.phase || phaseHint);
+    if (phase === 'final' && !out.gold_prompt && !forceFinal) phase = 'confirm';
 
     res.json({
       phase,
@@ -98,9 +98,8 @@ Follow the re-ask policy (if you re-ask, change the wording and include examples
       _ask_counts: Object.fromEntries(FIELDS.map(f => [f, getAskCount(sessionId, f)]))
     });
   } catch (err) {
-    console.error('Coach error:', err?.status, err?.message);
     res.status(500).json({ error: 'coach_failed', detail: err?.message || String(err) });
   }
 });
 
-app.listen(PORT, () => console.log(`Ms LegalEase server on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Ms LegalEase v3.1 server on http://localhost:${PORT}`));
